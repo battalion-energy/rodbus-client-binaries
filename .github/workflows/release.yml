@@ -102,7 +102,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: rodbus-client-${{ matrix.target }}-archive
-          path: rodbus-client-${{ needs.check_release.outputs.tag }}-${{ matrix.target }}.tar.gz
+          path: rodbus-client-${{ matrix.target }}.tar.gz
 
   create_release:
     needs: [check_release, package_archive]
