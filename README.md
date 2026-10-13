@@ -1,4 +1,4 @@
-# rodbus-client
+# rodbus-client-binaries
 
 Prebuilt static Linux binaries for
 [`rodbus-client`](https://github.com/stepfunc/rodbus).
