@@ -4,12 +4,23 @@ on:
   push:
     branches: [main]
 
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+
   # Check upstream once a week
   schedule:
     - cron: '23 13 * * 1'
 
 permissions:
-  contents: write
+  contents: read
+
+# Keep release-tag selection and publication ordered, while allowing separate PR
+# validations to run independently.
+concurrency:
+  group: rodbus-client-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   check_release:
@@ -17,26 +28,51 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     outputs:
-      tag: ${{ steps.upstream.outputs.tag }}
-      should_build: ${{ steps.local_release.outputs.should_build }}
+      tag: ${{ steps.next_revision.outputs.tag || steps.fetch_upstream.outputs.tag }}
+      should_build: ${{ github.event_name != 'schedule' || steps.upstream_is_published.outputs.published != 'true' }}
 
     steps:
-      - id: upstream
+      - id: fetch_upstream
         name: Get latest upstream release
         run: |
           tag="$(gh api repos/stepfunc/rodbus/releases/latest --jq '.tag_name')"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - id: local_release
-        name: Check whether it is already published
+      - id: upstream_is_published
+        name: Check upstream release
         env:
-          TAG: ${{ steps.upstream.outputs.tag }}
+          UPSTREAM_TAG: ${{ steps.fetch_upstream.outputs.tag }}
         run: |
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          if gh release view "$UPSTREAM_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
           else
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "published=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - id: local_revision
+        if: github.event_name == 'push' && steps.upstream_is_published.outputs.published == 'true'
+        name: Get local revision
+        env:
+          UPSTREAM_TAG: ${{ steps.fetch_upstream.outputs.tag }}
+        run: |
+          latest_tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName')"
+          revision=0
+
+          if [[ "$latest_tag" != "$UPSTREAM_TAG" ]]; then
+            # Extract and validate the revision from an existing vX.Y.Z-rN release.
+            revision="${latest_tag#"$UPSTREAM_TAG-r"}"
+            [[ "$latest_tag" == "$UPSTREAM_TAG-r"* && "$revision" =~ ^[1-9][0-9]*$ ]] || exit 1
+          fi
+
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - id: next_revision
+        if: github.event_name == 'push' && steps.upstream_is_published.outputs.published == 'true'
+        name: Increment local revision
+        env:
+          UPSTREAM_TAG: ${{ steps.fetch_upstream.outputs.tag }}
+          REVISION: ${{ steps.local_revision.outputs.revision }}
+        run: echo "tag=${UPSTREAM_TAG}-r$((10#$REVISION + 1))" >> "$GITHUB_OUTPUT"
 
   build_binary:
     needs: check_release
@@ -59,9 +95,12 @@ jobs:
           tool: cross@0.2.5
 
       - name: Clone upstream
+        env:
+          TAG: ${{ needs.check_release.outputs.tag }}
         run: |
-            git clone --depth 1 \
-            --branch "${{ needs.check_release.outputs.tag }}" \
+          upstream_tag="${TAG%-r[0-9]*}"
+          git clone --depth 1 \
+            --branch "$upstream_tag" \
             https://github.com/stepfunc/rodbus.git rodbus-upstream
 
       - name: Build rodbus-client
@@ -96,7 +135,7 @@ jobs:
           path: artifact
 
       - name: Create release archive
-        run: tar -C artifact -czf rodbus-client-${{ needs.check_release.outputs.tag }}-${{ matrix.target }}.tar.gz rodbus-client
+        run: tar -C artifact -czf rodbus-client-${{ matrix.target }}.tar.gz rodbus-client
 
       - name: Upload release archive
         uses: actions/upload-artifact@v7
@@ -106,10 +145,13 @@ jobs:
 
   create_release:
     needs: [check_release, package_archive]
+    if: github.event_name != 'pull_request' && needs.check_release.outputs.should_build == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: ${{ needs.check_release.outputs.tag }}
+      RELEASE_TAG: ${{ needs.check_release.outputs.tag }}
 
     steps:
       - name: Download release archives
@@ -124,7 +166,8 @@ jobs:
 
       - name: Create GitHub Release
         run: |
-          gh release create "$TAG" dist/* \
+          gh release create "$RELEASE_TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "rodbus-client $TAG" \
+            --target "$GITHUB_SHA" \
+            --title "rodbus-client $RELEASE_TAG" \
             --generate-notes
