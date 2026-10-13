@@ -96,7 +96,7 @@ jobs:
           path: artifact
 
       - name: Create release archive
-        run: tar -C artifact -czf rodbus-client-${{ needs.check_release.outputs.tag }}-${{ matrix.target }}.tar.gz rodbus-client
+        run: tar -C artifact -czf rodbus-client-${{ matrix.target }}.tar.gz rodbus-client
 
       - name: Upload release archive
         uses: actions/upload-artifact@v7
